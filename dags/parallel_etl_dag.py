@@ -2,6 +2,32 @@ from datetime import datetime
 import time
 
 from airflow.sdk import dag, task
+from kubernetes.client import models as k8s
+
+
+# Resource configuration that KubernetesExecutor will apply
+# to each transformation task Pod.
+transform_executor_config = {
+    "pod_override": k8s.V1Pod(
+        spec=k8s.V1PodSpec(
+            containers=[
+                k8s.V1Container(
+                    name="base",
+                    resources=k8s.V1ResourceRequirements(
+                        requests={
+                            "cpu": "500m",
+                            "memory": "256Mi",
+                        },
+                        limits={
+                            "cpu": "1",
+                            "memory": "512Mi",
+                        },
+                    ),
+                )
+            ]
+        )
+    )
+}
 
 
 @dag(
@@ -9,67 +35,113 @@ from airflow.sdk import dag, task
     start_date=datetime(2026, 1, 1),
     schedule=None,
     catchup=False,
-    tags=["kubernetes", "parallel", "etl", "lab"],
+    tags=["kubernetes", "parallel", "etl", "resources"],
 )
 def kubernetes_parallel_etl_lab():
 
+    # ---------------------------------------------------------
+    # EXTRACT
+    # ---------------------------------------------------------
     @task
     def extract():
         print("Extracting sales data...")
 
         return [
-            {"product": "Laptop", "quantity": 2, "price": 900.00},
-            {"product": "Monitor", "quantity": 4, "price": 250.00},
-            {"product": "Keyboard", "quantity": 10, "price": 75.00},
+            {
+                "product": "Laptop",
+                "quantity": 2,
+                "price": 900.00,
+            },
+            {
+                "product": "Monitor",
+                "quantity": 4,
+                "price": 250.00,
+            },
+            {
+                "product": "Keyboard",
+                "quantity": 10,
+                "price": 75.00,
+            },
         ]
 
-    @task
+    # ---------------------------------------------------------
+    # TRANSFORM 1
+    # ---------------------------------------------------------
+    @task(executor_config=transform_executor_config)
     def transform_revenue(records):
+
         print("Starting revenue transformation...")
+
+        # Keep the Pod alive long enough to observe it.
         time.sleep(30)
 
         result = []
 
         for record in records:
-            result.append({
-                "product": record["product"],
-                "revenue": record["quantity"] * record["price"],
-            })
+            result.append(
+                {
+                    "product": record["product"],
+                    "revenue": record["quantity"] * record["price"],
+                }
+            )
 
         print("Revenue transformation complete.")
+
         return result
 
-    @task
+    # ---------------------------------------------------------
+    # TRANSFORM 2
+    # ---------------------------------------------------------
+    @task(executor_config=transform_executor_config)
     def transform_quantity(records):
+
         print("Starting quantity transformation...")
+
         time.sleep(30)
 
         total_quantity = sum(
-            record["quantity"] for record in records
+            record["quantity"]
+            for record in records
         )
 
         print(f"Total quantity sold: {total_quantity}")
+
         return total_quantity
 
-    @task
+    # ---------------------------------------------------------
+    # TRANSFORM 3
+    # ---------------------------------------------------------
+    @task(executor_config=transform_executor_config)
     def transform_average_price(records):
+
         print("Starting average price transformation...")
+
         time.sleep(30)
 
         average_price = (
-            sum(record["price"] for record in records)
+            sum(
+                record["price"]
+                for record in records
+            )
             / len(records)
         )
 
-        print(f"Average product price: ${average_price:.2f}")
+        print(
+            f"Average product price: ${average_price:.2f}"
+        )
+
         return average_price
 
+    # ---------------------------------------------------------
+    # LOAD
+    # ---------------------------------------------------------
     @task
     def load(
         revenue_records,
         total_quantity,
         average_price,
     ):
+
         print("Loading transformed results...")
 
         total_revenue = sum(
@@ -77,18 +149,25 @@ def kubernetes_parallel_etl_lab():
             for record in revenue_records
         )
 
-        print("-------------------------------")
+        print("--------------------------------")
         print(f"Total Revenue: ${total_revenue:.2f}")
         print(f"Total Quantity: {total_quantity}")
         print(f"Average Price: ${average_price:.2f}")
-        print("-------------------------------")
+        print("--------------------------------")
+
+    # ---------------------------------------------------------
+    # DAG DEPENDENCIES
+    # ---------------------------------------------------------
 
     raw_data = extract()
 
+    # These three tasks have the same upstream dependency and
+    # therefore become runnable in parallel after extract().
     revenue = transform_revenue(raw_data)
     quantity = transform_quantity(raw_data)
     average_price = transform_average_price(raw_data)
 
+    # load() waits for all three transformations.
     load(
         revenue,
         quantity,
